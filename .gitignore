@@ -1,0 +1,15 @@
+# Only explicitly listed tool files can be added to this repository.
+# Keep datasets, captions, models, local state, logs, and settings outside Git.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/caption_reviewer.py
+!/caption_reviewer_state.py
+!/caption_reviewer.html
+!/caption_direction_tools.js
+!/caption_filter_tools.js
+!/run_caption_reviewer.bat
+!/test_caption_reviewer.py
+!/test_caption_direction_tools.js
+!/test_caption_filter_tools.js
