@@ -8,7 +8,7 @@ The app runs on your computer and binds to `127.0.0.1`. It includes no cloud ser
 
 - Python 3.10 or newer.
 - A modern desktop browser.
-- Optional: [Pillow](https://pypi.org/project/Pillow/) to display TIFF images. Other supported formats use Python's standard library and the browser.
+- Optional: [Pillow](https://pypi.org/project/Pillow/) to display TIFF images and to make fast thumbnails in Grid mode. Without it, Grid mode shows full-size images. Other supported formats use Python's standard library and the browser.
 
 ## Start reviewing
 
@@ -58,6 +58,13 @@ The app also reads the older format with a blank line between tags and descripti
 - Track **Viewed (V)**, **Edited (E)**, and **Done (D)**. Double-click an already selected image entry to cycle its status.
 - Move between unfinished images, mark the current image done, and resume progress later.
 - Refresh the folder after external changes. Saves detect conflicting caption edits rather than silently replacing them.
+- **Grid mode** (switch between **Review** and **Grid** at the top; the app remembers your choice):
+  - Shows thumbnails of exactly the images that pass the filters on the left, updating as you type. Clicking an image name in the left list scrolls to its thumbnail.
+  - **Click** a thumbnail to toggle it in **Group A** (blue), **Shift+click** to toggle it in **Group B** (orange). An image can be in both groups, so you can collect two sets (for example two outfits) in one pass. Selections persist while you scroll or change filters; **Select shown** adds every filtered image to a group and **Clear** empties it.
+  - Each group has its own tag box (comma-separated) and the same options as the `manual.py` tagging script: **Chance** (probability for each tag in each caption, 0.0-1.0), **Random placement**, and **Favor earlier** (treat added tags as important). **Apply** (or Enter in the tag box) adds the tags to every image in that group after a confirmation, skips tags a caption already has, keeps each description intact, marks changed images Edited, and clears the group.
+  - When `manual.py` and `caption_format.py` sit beside `caption_reviewer.py`, Grid mode uses their exact tag rules (activation tags such as `brf...` stay first, a new `@artist` tag replaces the old one right after them). Otherwise new tags are appended, or placed randomly when Random placement is on.
+  - **Zoom inside a thumbnail:** hover an image and use **Ctrl+wheel** to zoom up to 8x around the cursor; moving the mouse pans, and leaving the tile resets it. The full-resolution image loads once you zoom past 1.5x. The **Zoom** setting in the grid toolbar switches to **Wheel zooms**, where the plain wheel zooms over images; then scroll with the scrollbar, PageUp/PageDown, or the wheel over the gaps between images.
+  - Thumbnail size slider. Thumbnails are cached in memory only; nothing is written to the dataset folder.
 
 ## Keyboard shortcuts
 
@@ -70,6 +77,15 @@ The app also reads the older format with a blank line between tags and descripti
 | Ctrl+PageUp / Ctrl+PageDown | Previous / next unfinished image |
 | Alt+D | Mark done and advance |
 | Ctrl+Z | Undo the last tag deletion when available |
+
+Grid mode uses its own mouse controls; the image-navigation and editing shortcuts above are inactive there (Ctrl+F and Ctrl+Shift+F still focus the filters).
+
+| Grid mode | Action |
+| --- | --- |
+| Click | Toggle image in Group A |
+| Shift+Click | Toggle image in Group B |
+| Ctrl+wheel over an image (or the wheel, with **Wheel zooms**) | Zoom into that image around the cursor |
+| Enter in a group's tag box | Apply that group's tags |
 
 ## Local files and privacy
 
@@ -92,5 +108,5 @@ python -m unittest -v test_caption_reviewer.py
 The JavaScript helper tests require Node.js with the built-in test runner:
 
 ```sh
-node --test test_caption_direction_tools.js test_caption_filter_tools.js
+node --test test_caption_direction_tools.js test_caption_filter_tools.js test_caption_grid_tools.js
 ```

@@ -9,7 +9,9 @@
 !/caption_reviewer.html
 !/caption_direction_tools.js
 !/caption_filter_tools.js
+!/caption_grid_tools.js
 !/run_caption_reviewer.bat
 !/test_caption_reviewer.py
 !/test_caption_direction_tools.js
 !/test_caption_filter_tools.js
+!/test_caption_grid_tools.js

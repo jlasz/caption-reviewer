@@ -110,6 +110,81 @@ class ReviewerTests(unittest.TestCase):
         })
         self.assertEqual((self.root / "image2.txt").read_bytes(), b"\xef\xbb\xbfclouds, sun")
 
+    def test_thumbnail_endpoint(self) -> None:
+        self.assertIn(b"CaptionGridTools", self.request("/caption_grid_tools.js")[1])
+        try:
+            from PIL import Image
+        except ImportError:
+            with self.assertRaises(HTTPError) as caught:
+                self.request("/api/thumb?id=0&size=200")
+            self.assertEqual(caught.exception.code, 501)
+            caught.exception.close()
+            return
+        import io
+
+        big = Image.new("RGBA", (900, 300), (255, 0, 0, 128))
+        buffer = io.BytesIO()
+        big.save(buffer, format="PNG")
+        (self.root / "image2.png").write_bytes(buffer.getvalue())
+        headers, data = self.request("/api/thumb?id=0&size=200")
+        self.assertEqual(headers["Content-Type"], "image/jpeg")
+        with Image.open(io.BytesIO(data)) as thumb:
+            self.assertEqual(thumb.size, (256, 85))
+        self.assertEqual(self.request("/api/thumb?id=0&size=200")[1], data)  # Cached.
+        (self.root / "image10.png").write_bytes(b"not an image")
+        with self.assertRaises(HTTPError) as caught:
+            self.request("/api/thumb?id=1&size=200")
+        self.assertEqual(caught.exception.code, 422)
+        caught.exception.close()
+        self.assertFalse(any(path.suffix == ".jpg" for path in self.root.rglob("*")))
+
+    def test_add_tags_to_selected_images(self) -> None:
+        (self.root / "image2.txt").write_bytes(b"\xef\xbb\xbflandscape, Sunset. A quiet sky. 2 birds fly.")
+        self.api("/api/status?id=0&status=D", "POST")
+        result = self.api("/api/add-tags", "POST", {
+            "paths": ["image2.png", "image10.png", "image2.png", "gone.png"],
+            "tags": " sunset ,  red sky,, ",
+        })
+        self.assertEqual(result["changed"], ["image2.png", "image10.png"])
+        self.assertEqual(result["missing"], ["gone.png"])
+        self.assertEqual(
+            (self.root / "image2.txt").read_bytes(),
+            b"\xef\xbb\xbflandscape, Sunset, red sky. A quiet sky. 2 birds fly.",
+        )
+        self.assertEqual((self.root / "image10.txt").read_text(encoding="utf-8"), "sunset, red sky")
+        statuses = {item["path"]: item["reviewStatus"] for item in result["items"]}
+        self.assertEqual(statuses, {"image2.png": "E", "image10.png": "E"})
+        searchable = {item["path"]: item["captionSearch"] for item in result["items"]}
+        self.assertIn("red sky", searchable["image10.png"])
+        again = self.api("/api/add-tags", "POST", {"paths": ["image10.png"], "tags": "red sky"})
+        self.assertEqual(again["unchanged"], ["image10.png"])
+        skipped = self.api("/api/add-tags", "POST", {
+            "paths": ["image10.png"], "tags": "night", "probability": 0,
+        })
+        self.assertEqual(skipped["skipped"], ["image10.png"])
+        # Edits made through the grid are not mistaken for external changes.
+        items = self.api("/api/rescan", "POST")["items"]
+        self.assertEqual([item["reviewStatus"] for item in items], ["E", "E"])
+        for payload in ({"paths": ["image10.png"], "tags": " , "},
+                        {"paths": "image10.png", "tags": "x"},
+                        {"paths": ["image10.png"], "tags": "x", "probability": 2}):
+            with self.assertRaises(HTTPError) as caught:
+                self.api("/api/add-tags", "POST", payload)
+            self.assertEqual(caught.exception.code, 400)
+            caught.exception.close()
+
+    def test_add_tags_random_placement_keeps_description(self) -> None:
+        import random
+        from caption_reviewer import add_tags, split_caption, join_caption
+
+        tags, description = split_caption("a, b, c. Prose stays. Intact.")
+        self.assertEqual((tags, description), (["a", "b", "c"], "Prose stays. Intact."))
+        placed, changed = add_tags(tags, ["x", "B"], randomize_placement=True, rng=random.Random(3))
+        self.assertTrue(changed)
+        self.assertEqual(sorted(placed), ["a", "b", "c", "x"])
+        self.assertTrue(join_caption(placed, description).endswith(". Prose stays. Intact."))
+        self.assertEqual(split_caption("a, b\n\nLegacy prose."), (["a", "b"], "Legacy prose."))
+
     def test_duplicate_instance_is_rejected_without_stopping_process(self) -> None:
         self.assertTrue(_process_exists(os.getpid()))
         self.assertFalse(_process_exists(-1))

@@ -82,11 +82,60 @@
     #position { flex:1; text-align:center; color:var(--muted); }
     .empty { color:var(--muted); padding:25px; text-align:center; }
     @media (max-width:1050px) { main { grid-template-columns:230px minmax(300px,1fr) minmax(320px,1fr); } }
+    .mode-switch { flex:none; display:flex; gap:2px; padding:3px; background:var(--panel2); border:1px solid var(--line); border-radius:8px; }
+    .mode-switch button { padding:4px 13px; font-size:12px; background:transparent; }
+    .mode-switch button.active { background:var(--accent); color:white; font-weight:650; }
+    #gridPanel { display:none; }
+    body.grid-mode main { grid-template-columns:285px minmax(0,1fr); }
+    body.grid-mode .viewer, body.grid-mode .editor-panel, body.grid-mode #save, body.grid-mode footer > button { display:none; }
+    body.grid-mode #gridPanel { display:flex; flex-direction:column; height:100%; min-width:0; min-height:0; background:var(--panel); }
+    .grid-toolbar { flex:none; display:flex; align-items:center; gap:14px; flex-wrap:wrap; padding:8px 12px; border-bottom:1px solid var(--line); color:var(--muted); font-size:12px; }
+    .grid-toolbar label { display:flex; align-items:center; gap:6px; }
+    .grid-toolbar input[type=range] { width:130px; }
+    #gridHint { margin-left:auto; }
+    .group-forms { flex:none; display:grid; gap:6px; padding:8px 12px; border-bottom:1px solid var(--line); }
+    .group-form { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px; color:var(--muted); }
+    .group-badge { flex:none; min-width:112px; padding:4px 8px; border:2px solid; border-radius:6px; font-weight:700; }
+    .group-form[data-group="a"] .group-badge { color:#8eaaff; border-color:var(--group-a); }
+    .group-form[data-group="b"] .group-badge { color:#ffb36b; border-color:var(--group-b); }
+    .group-form .group-tags { flex:1 1 240px; margin:0; padding:6px 9px; }
+    .group-form .group-probability { width:64px; margin:0; padding:6px 7px; }
+    .group-form label { display:flex; align-items:center; gap:4px; white-space:nowrap; }
+    .group-form label.disabled { opacity:.4; }
+    .group-result { flex-basis:100%; min-height:0; color:#9fd6ae; }
+    .group-result:empty { display:none; } .group-result.error { color:var(--danger); }
+    :root { --group-a:#5b83ff; --group-b:#ff9b3d; }
+    #grid { flex:1; min-height:0; overflow:auto; display:grid; grid-template-columns:repeat(auto-fill,minmax(var(--tile,200px),1fr)); grid-auto-rows:max-content; align-content:start; gap:8px; padding:10px 12px; scrollbar-color:#424b59 transparent; }
+    .tile { position:relative; align-self:start; overflow:hidden; border-radius:6px; background:#0a0c0f; cursor:pointer; user-select:none; -webkit-user-select:none; }
+    .tile::before { content:''; display:block; padding-top:100%; }
+    .tile img { position:absolute; inset:0; display:block; width:100%; height:100%; object-fit:contain; transform-origin:50% 50%; pointer-events:none; }
+    .tile::after { content:''; position:absolute; inset:0; border-radius:6px; pointer-events:none; }
+    .tile:hover::after { box-shadow:inset 0 0 0 2px #5d6676; }
+    .tile.sel-a::after { box-shadow:inset 0 0 0 4px var(--group-a); }
+    .tile.sel-b::after { box-shadow:inset 0 0 0 4px var(--group-b); }
+    .tile.sel-a.sel-b::after { box-shadow:inset 0 0 0 4px var(--group-a),inset 0 0 0 8px var(--group-b); }
+    .tile.flash::after { animation:tileFlash .45s ease-in-out 3 alternate; }
+    @keyframes tileFlash { from { box-shadow:inset 0 0 0 4px rgba(255,255,255,0); } to { box-shadow:inset 0 0 0 4px rgba(255,255,255,.9); } }
+    .tile-badges { position:absolute; z-index:2; top:6px; left:6px; display:flex; gap:4px; pointer-events:none; }
+    .tile-badge { display:none; width:20px; height:20px; border-radius:50%; place-items:center; color:white; font-size:11px; font-weight:800; }
+    .tile.sel-a .badge-a { display:grid; background:var(--group-a); } .tile.sel-b .badge-b { display:grid; background:var(--group-b); }
+    .tile-meta { position:absolute; z-index:2; left:0; right:0; bottom:0; display:flex; gap:6px; padding:12px 7px 4px; color:#dfe5ee; font-size:11px; background:linear-gradient(transparent,rgba(0,0,0,.78)); pointer-events:none; }
+    .tile-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .tile-status { font-weight:800; } .tile-status.st-V { color:#f3d77a; } .tile-status.st-E { color:#e96f1a; } .tile-status.st-D { color:#35e47a; }
+    .tile.zoomed .tile-meta, .tile.zoomed .tile-badges { opacity:0; }
+    .tile.missing-caption .tile-name::before { content:'● '; color:#e7a94b; }
+    #gridMore { grid-column:1/-1; height:1px; }
+    #grid:focus { outline:none; }
+    .grid-empty { grid-column:1/-1; }
   </style>
 </head>
 <body>
   <header>
     <div class="brand">Caption Reviewer</div>
+    <div class="mode-switch" role="group" aria-label="View mode">
+      <button id="modeReview" type="button" class="active" title="Review one image at a time">Review</button>
+      <button id="modeGrid" type="button" title="Skim thumbnails, select images, and add tags to them">Grid</button>
+    </div>
     <div id="root"></div>
     <button id="refresh" class="tiny" title="Rescan for newly generated captions and images">Refresh</button>
     <span id="saveState">Loading…</span>
@@ -140,6 +189,23 @@
       <div class="tag-head"><div class="eyebrow" style="margin:0">TAGS</div><span id="tagCount"></span></div>
       <div id="tagPanel"><span class="tag-empty">Choose an image to view its tags.</span></div>
     </section>
+    <section id="gridPanel">
+      <div class="grid-toolbar">
+        <label title="Thumbnail size">Size <input id="tileSize" type="range" min="110" max="520" step="10" value="200"></label>
+        <label title="How the mouse wheel zooms into the image under the cursor">Zoom
+          <select id="wheelMode" class="search-mode" style="min-width:0;padding:2px 4px;color:var(--text);background:var(--panel2)">
+            <option value="ctrl">Ctrl+wheel zooms</option>
+            <option value="wheel">Wheel zooms</option>
+          </select>
+        </label>
+        <span id="gridHint">Click: group A · Shift+click: group B · <span id="zoomHint">Ctrl+wheel</span> over an image: zoom</span>
+      </div>
+      <div class="group-forms">
+        <div class="group-form" data-group="a"></div>
+        <div class="group-form" data-group="b"></div>
+      </div>
+      <div id="grid"></div>
+    </section>
   </main>
   <footer>
     <button id="previous">←&nbsp; Previous unfinished</button>
@@ -149,6 +215,7 @@
   <div id="undoToast" role="status"><span id="undoMessage"></span><button id="undoButton" type="button">Undo</button></div>
   <script src="/caption_direction_tools.js"></script>
   <script src="/caption_filter_tools.js"></script>
+  <script src="/caption_grid_tools.js"></script>
   <script>
     const $ = id => document.getElementById(id);
     const {parseDirectionQuery,containsDirection,editDescription,opposite}=CaptionDirectionTools;
@@ -333,8 +400,13 @@
       const oldPath = currentId === null ? null : items[currentId]?.path;
       const data=await fetchJson(rescan ? '/api/rescan' : '/api/items',{method:rescan?'POST':'GET'},rescan?60000:30000);
       if (requestGeneration!==itemsRequestGeneration) return;
-      items=data.items; currentId=null; $('root').textContent=data.root; filterItems();
-      const restored = oldPath ? items.findIndex(item => item.path === oldPath) : -1;
+      items=data.items; currentId=null; $('root').textContent=data.root;
+      GridTools.pruneGroups(groups,items.map(item=>item.path)); filterItems();
+      if (viewMode==='grid') { pendingReviewPath=oldPath ?? pendingReviewPath; setSaveState('Ready'); if (!items.length) clearView('No supported images found.'); return; }
+      await openReviewTarget(oldPath);
+    }
+    async function openReviewTarget(preferredPath=null) {
+      const restored = preferredPath ? items.findIndex(item => item.path === preferredPath) : -1;
       const firstUnfinished=items.findIndex(item=>item.reviewStatus!=='D');
       if (items.length) await goTo(restored >= 0 ? restored : firstUnfinished >= 0 ? firstUnfinished : 0); else clearView('No supported images found.');
     }
@@ -361,7 +433,7 @@
         const label=document.createElement('span'); label.className='item-label'; label.textContent=item.path.replace(/\.[^.]+$/, '')+(item.reviewStatus?` ${item.reviewStatus}`:'');
         button.append(dot,label);
         button.addEventListener('mousedown',event=>{if(event.detail===1) button.dataset.wasSelected=item.id===currentId?'1':'0'});
-        button.addEventListener('click',()=>goTo(item.id));
+        button.addEventListener('click',()=>viewMode==='grid'?revealTile(item.path):goTo(item.id));
         button.addEventListener('dblclick',event=>{event.preventDefault();if(button.dataset.wasSelected==='1') toggleReviewStatus(item.id)});
         button.addEventListener('mouseenter',showTextSearchHighlights);
         button.addEventListener('mouseleave',clearTagHighlights);
@@ -370,6 +442,7 @@
       $('list').replaceChildren(fragment);
       updateProgressCounters();
       scrollActive(false); updateNavigation(); renderDirectionTools();
+      if (viewMode==='grid') renderGrid();
     }
 
     function updateProgressCounters() {
@@ -470,6 +543,7 @@
     }
     function updateNavigation() {
       const position=filtered.findIndex(item=>item.id===currentId), filteredMode=$('search').value.trim()!=='' || $('textSearch').value.trim()!=='' || $('negativeTextSearch').value.trim()!=='';
+      if (viewMode==='grid') { updateGridStatus(); return; }
       if (currentId===null) { $('position').textContent='No images'; $('previous').disabled=true; $('next').disabled=true; return; }
       const place=position>=0 ? `${(position+1).toLocaleString()} / ${filtered.length.toLocaleString()}${filteredMode?' filtered':''}` : `Outside current filter · ${filtered.length.toLocaleString()} shown`;
       $('position').textContent=`${place} · ${viewed.size.toLocaleString()} viewed this session`;
@@ -503,6 +577,235 @@
     function toggleFit() { actualSize=!actualSize; $('imageStage').classList.toggle('actual',actualSize); $('fit').textContent=actualSize?'Fit':'100%'; }
     function clearView(message) { currentId=null; setEditorCaption(''); $('tagTextEditor').disabled=true; $('descriptionEditor').disabled=true; renderTags(); $('imageHost').innerHTML=`<div class="empty">${message}</div>`; renderDirectionTools(); $('position').textContent='No images'; }
 
+    // ---- Grid mode -------------------------------------------------------
+    const GridTools=CaptionGridTools;
+    const GRID_CHUNK=240, GROUP_NAMES={a:'Group A',b:'Group B'};
+    const storage={ get(key,fallback){ try { return localStorage.getItem('captionReviewer.'+key) ?? fallback; } catch { return fallback; } },
+                    set(key,value){ try { localStorage.setItem('captionReviewer.'+key,value); } catch {} } };
+    let viewMode='review', pendingReviewPath=null, gridLimit=GRID_CHUNK, gridObserver=null, modeSwitchInFlight=false;
+    const groups={a:new Set(),b:new Set()};
+    let wheelMode=storage.get('wheelMode','ctrl')==='wheel'?'wheel':'ctrl';
+    let tileSize=Math.min(520,Math.max(110,Number(storage.get('tileSize','200'))||200));
+
+    function thumbUrl(item) { return `/api/thumb?id=${item.id}&size=${GridTools.thumbnailSize(tileSize,window.devicePixelRatio)}`; }
+    function tileFor(path) { return document.querySelector(`.tile[data-path="${CSS.escape(path)}"]`); }
+    function paintTileSelection(tile) {
+      const path=tile.dataset.path;
+      tile.classList.toggle('sel-a',groups.a.has(path)); tile.classList.toggle('sel-b',groups.b.has(path));
+    }
+    function makeTile(item) {
+      const tile=document.createElement('div'); tile.className='tile'+(item.hasCaption?'':' missing-caption');
+      tile.dataset.path=item.path; tile.dataset.id=item.id; tile.title=item.path+(item.hasCaption?'':'\n(no caption file yet)');
+      const image=document.createElement('img'); image.alt=''; image.loading='lazy'; image.decoding='async'; image.draggable=false;
+      image.src=thumbUrl(item);
+      image.addEventListener('error',()=>{ if (!image.dataset.fallback) { image.dataset.fallback='1'; image.src=`/api/image?id=${item.id}`; } });
+      const badges=document.createElement('div'); badges.className='tile-badges';
+      for (const group of ['a','b']) { const badge=document.createElement('span'); badge.className=`tile-badge badge-${group}`; badge.textContent=group.toUpperCase(); badges.append(badge); }
+      const meta=document.createElement('div'); meta.className='tile-meta';
+      const name=document.createElement('span'); name.className='tile-name'; name.textContent=item.path.replace(/\.[^.]+$/,'');
+      meta.append(name);
+      if (item.reviewStatus) { const status=document.createElement('span'); status.className=`tile-status st-${item.reviewStatus}`; status.textContent=item.reviewStatus; meta.append(status); }
+      tile.append(image,badges,meta); paintTileSelection(tile);
+      return tile;
+    }
+    function renderGrid(resetLimit=true) {
+      if (resetLimit) gridLimit=GRID_CHUNK;
+      const grid=$('grid'), fragment=document.createDocumentFragment();
+      gridObserver?.disconnect();
+      if (!filtered.length) {
+        const empty=document.createElement('div'); empty.className='empty grid-empty';
+        empty.textContent=items.length?'No images match the current filters.':'No supported images found.'; fragment.append(empty);
+      }
+      for (const item of filtered.slice(0,gridLimit)) fragment.append(makeTile(item));
+      if (filtered.length>gridLimit) {
+        const more=document.createElement('div'); more.id='gridMore'; fragment.append(more);
+        gridObserver=new IntersectionObserver(entries=>{ if (entries.some(entry=>entry.isIntersecting)) extendGrid(); },{root:grid,rootMargin:'800px'});
+        gridObserver.observe(more);
+      }
+      grid.replaceChildren(fragment);
+      if (resetLimit) grid.scrollTop=0;
+      updateGridStatus();
+    }
+    function extendGrid(untilIndex=-1) {
+      const grid=$('grid'), start=gridLimit;
+      gridLimit=Math.max(gridLimit+GRID_CHUNK,untilIndex+1);
+      const fragment=document.createDocumentFragment();
+      for (const item of filtered.slice(start,gridLimit)) fragment.append(makeTile(item));
+      const more=$('gridMore');
+      if (more) grid.insertBefore(fragment,more); else grid.append(fragment);
+      if (filtered.length<=gridLimit) { gridObserver?.disconnect(); gridObserver=null; more?.remove(); }
+    }
+    function revealTile(path) {
+      const index=filtered.findIndex(item=>item.path===path); if (index<0) return;
+      if (index>=gridLimit) extendGrid(index);
+      const tile=tileFor(path); if (!tile) return;
+      tile.scrollIntoView({block:'center',behavior:'smooth'});
+      tile.classList.remove('flash'); void tile.offsetWidth; tile.classList.add('flash');
+      setTimeout(()=>tile.classList.remove('flash'),1500);
+    }
+    function updateGridStatus() {
+      if (viewMode!=='grid') return;
+      const shown=new Set(filtered.map(item=>item.path));
+      for (const group of ['a','b']) {
+        const form=document.querySelector(`.group-form[data-group="${group}"]`), total=groups[group].size;
+        const hidden=[...groups[group]].filter(path=>!shown.has(path)).length;
+        form.querySelector('.group-badge').textContent=`${GROUP_NAMES[group]} · ${total.toLocaleString()}`;
+        form.querySelector('.group-badge').title=hidden?`${hidden.toLocaleString()} selected image(s) are hidden by the current filters but will still be tagged`:'';
+        form.querySelector('.group-apply').disabled=!total;
+        form.querySelector('.group-clear').disabled=!total;
+      }
+      const hiddenNote=[...groups.a,...groups.b].some(path=>!shown.has(path))?' · some selected images are hidden by filters':'';
+      $('position').textContent=`${filtered.length.toLocaleString()} shown · A ${groups.a.size.toLocaleString()} · B ${groups.b.size.toLocaleString()}${hiddenNote}`;
+    }
+    function buildGroupForm(form) {
+      const group=form.dataset.group, key=`group.${group}.`;
+      form.innerHTML='';
+      const badge=document.createElement('span'); badge.className='group-badge';
+      const tags=document.createElement('input'); tags.className='filter-input group-tags'; tags.type='text'; tags.autocomplete='off'; tags.spellcheck=false;
+      tags.placeholder=`Tags to add to ${GROUP_NAMES[group]}, comma-separated…`;
+      const probabilityLabel=document.createElement('label'); probabilityLabel.title='Chance for each tag in each caption (0.0-1.0), like manual.py';
+      const probability=document.createElement('input'); probability.className='filter-input group-probability'; probability.type='number'; probability.min='0'; probability.max='1'; probability.step='0.05';
+      probability.value=storage.get(key+'probability','1'); probabilityLabel.append('Chance',probability);
+      const randomLabel=document.createElement('label'); randomLabel.title='Randomize ordinary tag placement';
+      const randomize=document.createElement('input'); randomize.type='checkbox'; randomize.checked=storage.get(key+'randomize','0')==='1'; randomLabel.append(randomize,'Random placement');
+      const importantLabel=document.createElement('label'); importantLabel.title='Treat added ordinary tags as important (favor earlier placement)';
+      const important=document.createElement('input'); important.type='checkbox'; important.checked=storage.get(key+'important','0')==='1'; importantLabel.append(important,'Favor earlier');
+      const apply=document.createElement('button'); apply.type='button'; apply.className='tiny accent group-apply'; apply.textContent='Apply';
+      const selectShown=document.createElement('button'); selectShown.type='button'; selectShown.className='tiny'; selectShown.textContent='Select shown'; selectShown.title=`Add every image that matches the filters to ${GROUP_NAMES[group]}`;
+      const clear=document.createElement('button'); clear.type='button'; clear.className='tiny group-clear'; clear.textContent='Clear';
+      const result=document.createElement('div'); result.className='group-result';
+      const syncImportant=()=>{ important.disabled=!randomize.checked; importantLabel.classList.toggle('disabled',!randomize.checked); };
+      syncImportant();
+      randomize.addEventListener('change',()=>{ storage.set(key+'randomize',randomize.checked?'1':'0'); syncImportant(); });
+      important.addEventListener('change',()=>storage.set(key+'important',important.checked?'1':'0'));
+      probability.addEventListener('change',()=>storage.set(key+'probability',probability.value));
+      tags.addEventListener('keydown',event=>{ if (event.key==='Enter') { event.preventDefault(); applyGroup(group); } });
+      apply.addEventListener('click',()=>applyGroup(group));
+      selectShown.addEventListener('click',()=>{ for (const item of filtered) groups[group].add(item.path); document.querySelectorAll('#grid .tile').forEach(paintTileSelection); updateGridStatus(); });
+      clear.addEventListener('click',()=>clearGroup(group));
+      form.append(badge,tags,probabilityLabel,randomLabel,importantLabel,apply,selectShown,clear,result);
+    }
+    function clearGroup(group) {
+      const paths=[...groups[group]]; groups[group].clear();
+      for (const path of paths) { const tile=tileFor(path); if (tile) paintTileSelection(tile); }
+      updateGridStatus();
+    }
+    function setGroupResult(group,text,isError=false) {
+      const result=document.querySelector(`.group-form[data-group="${group}"] .group-result`);
+      result.textContent=text; result.classList.toggle('error',isError);
+    }
+    async function applyGroup(group) {
+      const form=document.querySelector(`.group-form[data-group="${group}"]`);
+      const tags=splitTags(form.querySelector('.group-tags').value), paths=[...groups[group]];
+      const probability=GridTools.parseProbability(form.querySelector('.group-probability').value);
+      const randomize=form.querySelector('input[type=checkbox]').checked, important=randomize && form.querySelectorAll('input[type=checkbox]')[1].checked;
+      if (!paths.length) { setGroupResult(group,`Select images first (${group==='a'?'click':'Shift+click'} thumbnails).`,true); return; }
+      if (!tags.length) { setGroupResult(group,'Enter at least one tag.',true); form.querySelector('.group-tags').focus(); return; }
+      if (probability===null) { setGroupResult(group,'Chance must be a number from 0.0 to 1.0.',true); return; }
+      const options=[probability<1?`chance ${probability}`:'',randomize?(important?'random placement, favor earlier':'random placement'):''].filter(Boolean).join(', ');
+      if (!confirm(`Add “${tags.join(', ')}” to ${paths.length.toLocaleString()} caption file(s) in ${GROUP_NAMES[group]}?${options?`\n\nOptions: ${options}`:''}\n\nTags already present are skipped.`)) return;
+      const apply=form.querySelector('.group-apply'); apply.disabled=true; setGroupResult(group,'Adding tags…');
+      try {
+        if (!await flushSave()) throw new Error('Could not save the open caption first.');
+        const data=await fetchJson('/api/add-tags',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths,tags:tags.join(', '),probability,randomize,important})},120000);
+        items=data.items;
+        const problems=[...data.missing.map(path=>`${path}: image no longer exists`),...data.failed.map(entry=>`${entry.path}: ${entry.error}`)];
+        const parts=[`${data.changed.length.toLocaleString()} changed`,`${data.unchanged.length.toLocaleString()} already had the tag(s)`];
+        if (data.skipped.length) parts.push(`${data.skipped.length.toLocaleString()} skipped by chance`);
+        if (problems.length) parts.push(`${problems.length.toLocaleString()} failed`);
+        groups[group].clear(); form.querySelector('.group-tags').value='';
+        setGroupResult(group,`Added “${tags.join(', ')}”: ${parts.join(' · ')}.${problems.length?' '+problems.slice(0,3).join('; '):''}`,problems.length>0);
+        if (problems.length) console.error(problems.join('\n'));
+        const scrollTop=$('grid').scrollTop, limit=gridLimit; filterItems(); if (limit>gridLimit) extendGrid(Math.min(limit,filtered.length)-1); $('grid').scrollTop=scrollTop;
+        setSaveState('Saved');
+      } catch(error) { setGroupResult(group,error?.message || String(error),true); apiError(error); }
+      finally { updateGridStatus(); }
+    }
+    function applyTileZoom(tile,zoom,origin) {
+      const image=tile.querySelector('img'); if (!image) return;
+      tile.dataset.zoom=String(zoom);
+      if (origin) image.style.transformOrigin=`${origin.x*100}% ${origin.y*100}%`;
+      image.style.transform=zoom>1?`scale(${zoom})`:'';
+      tile.classList.toggle('zoomed',zoom>1);
+      if (GridTools.needsFullResolution(zoom) && !tile.dataset.full) {
+        tile.dataset.full='loading';
+        const full=new Image(), id=tile.dataset.id;
+        full.onload=()=>{ if (tile.dataset.full==='loading') { image.src=full.src; tile.dataset.full='1'; } };
+        full.onerror=()=>{ delete tile.dataset.full; };
+        full.src=`/api/image?id=${id}`;
+      }
+    }
+    function resetTileZoom(tile) {
+      if (!tile.dataset.zoom && !tile.dataset.full) return;
+      const image=tile.querySelector('img');
+      delete tile.dataset.zoom; tile.classList.remove('zoomed');
+      if (image) { image.style.transform=''; image.style.transformOrigin=''; }
+      if (tile.dataset.full) { delete tile.dataset.full; const item=items[Number(tile.dataset.id)]; if (image && item) image.src=thumbUrl(item); }
+    }
+    function updateZoomHint() {
+      $('wheelMode').value=wheelMode;
+      $('zoomHint').textContent=wheelMode==='wheel'?'Wheel':'Ctrl+wheel';
+      $('gridHint').title=wheelMode==='wheel'
+        ?'Wheel over an image zooms it. Scroll with the scrollbar, PageUp/PageDown, or the wheel over gaps between images.'
+        :'Ctrl+wheel over an image zooms it; the plain wheel scrolls the grid.';
+    }
+    async function setViewMode(mode) {
+      if (mode===viewMode || modeSwitchInFlight) return;
+      modeSwitchInFlight=true;
+      try {
+        if (mode==='grid') {
+          if (!await flushSave()) return;
+          pendingReviewPath=currentId===null?pendingReviewPath:items[currentId]?.path ?? null;
+          hideUndoToast(true);
+        }
+        viewMode=mode; storage.set('mode',mode);
+        document.body.classList.toggle('grid-mode',mode==='grid');
+        $('modeReview').classList.toggle('active',mode==='review'); $('modeGrid').classList.toggle('active',mode==='grid');
+        if (mode==='grid') { renderGrid(); $('grid').focus({preventScroll:true}); }
+        else {
+          $('grid').replaceChildren(); gridObserver?.disconnect(); gridObserver=null;
+          // Reload the caption from disk: grid tagging may have changed it.
+          const path=pendingReviewPath; currentId=null; pendingReviewPath=null;
+          scrollActive(false); await openReviewTarget(path);
+        }
+      } finally { modeSwitchInFlight=false; }
+    }
+
+    document.querySelectorAll('.group-form').forEach(buildGroupForm);
+    $('grid').tabIndex=-1;
+    $('tileSize').value=String(tileSize); document.documentElement.style.setProperty('--tile',`${tileSize}px`);
+    $('tileSize').addEventListener('input',()=>{ tileSize=Number($('tileSize').value); document.documentElement.style.setProperty('--tile',`${tileSize}px`); });
+    $('tileSize').addEventListener('change',()=>{ storage.set('tileSize',String(tileSize)); document.querySelectorAll('#grid .tile').forEach(tile=>{ const item=items[Number(tile.dataset.id)], image=tile.querySelector('img'); if (item && image && !tile.dataset.full && !image.dataset.fallback) image.src=thumbUrl(item); }); });
+    $('wheelMode').addEventListener('change',()=>{ wheelMode=$('wheelMode').value==='wheel'?'wheel':'ctrl'; storage.set('wheelMode',wheelMode); updateZoomHint(); });
+    updateZoomHint();
+    $('modeReview').addEventListener('click',()=>setViewMode('review'));
+    $('modeGrid').addEventListener('click',()=>setViewMode('grid'));
+    $('grid').addEventListener('mousedown',event=>{ if (event.shiftKey && event.target.closest('.tile')) event.preventDefault(); });
+    $('grid').addEventListener('click',event=>{
+      const tile=event.target.closest('.tile'); if (!tile || event.button!==0) return;
+      GridTools.toggleInGroup(groups,event.shiftKey?'b':'a',tile.dataset.path);
+      paintTileSelection(tile); updateGridStatus();
+    });
+    $('grid').addEventListener('wheel',event=>{
+      const tile=event.target.closest('.tile'); if (!tile) return;
+      if (!GridTools.wantsZoom(wheelMode,event.ctrlKey)) return;
+      event.preventDefault();
+      const zoom=GridTools.nextZoom(Number(tile.dataset.zoom||1),event.deltaY,event.deltaMode);
+      applyTileZoom(tile,zoom,GridTools.pointerOrigin(tile.getBoundingClientRect(),event.clientX,event.clientY));
+      if (zoom<=1) resetTileZoom(tile);
+    },{passive:false});
+    $('grid').addEventListener('mousemove',event=>{
+      const tile=event.target.closest('.tile'); if (!tile || !tile.dataset.zoom) return;
+      const origin=GridTools.pointerOrigin(tile.getBoundingClientRect(),event.clientX,event.clientY);
+      tile.querySelector('img').style.transformOrigin=`${origin.x*100}% ${origin.y*100}%`;
+    });
+    $('grid').addEventListener('mouseout',event=>{
+      const tile=event.target.closest('.tile'); if (!tile || tile.contains(event.relatedTarget)) return;
+      resetTileZoom(tile);
+    });
+    // Block the browser's own Ctrl+wheel page zoom anywhere over the grid in Ctrl mode.
+    window.addEventListener('wheel',event=>{ if (viewMode==='grid' && event.ctrlKey && event.target.closest?.('#grid')) event.preventDefault(); },{passive:false});
+
     $('tagTextEditor').addEventListener('input',markDirty);
     $('descriptionEditor').addEventListener('input',()=>{normalizeTagSeparator();markDirty()});
     $('tagTextEditor').addEventListener('blur',()=>{if(normalizeTagSeparator()) markDirty()});
@@ -530,6 +833,7 @@
     document.addEventListener('keydown',event=>{
       if (event.ctrlKey && event.key.toLowerCase()==='s') { event.preventDefault(); saveNow(); }
       if (event.ctrlKey && event.key.toLowerCase()==='f') { event.preventDefault(); const search=event.shiftKey?$('textSearch'):$('search'); search.focus(); search.select(); }
+      if (viewMode==='grid') return; // The rest act on the single-image editor, which grid mode hides.
       if (event.ctrlKey && !event.shiftKey && event.key.toLowerCase()==='z' && lastTagDeletion?.itemId===currentId && editorCaption()===lastTagDeletion.after) { event.preventDefault(); undoTagDeletion(); }
       if (event.altKey && event.key.toLowerCase()==='d') { event.preventDefault(); markDoneAndAdvance(); }
       if (event.altKey && event.key==='ArrowLeft') { event.preventDefault(); navigate(-1); }
@@ -539,7 +843,8 @@
     });
     document.addEventListener('visibilitychange',()=>{if(document.hidden) saveNow()});
     window.addEventListener('pagehide',()=>{if(dirty&&currentId!==null) navigator.sendBeacon(`/api/caption?id=${currentId}`,new Blob([JSON.stringify({caption:editorCaption(),captionVersion:currentCaptionVersion})],{type:'application/json'}))});
-    loadItems().catch(apiError);
+    // Open straight into grid mode when that was last used, without marking an image Viewed.
+    (storage.get('mode','review')==='grid'?setViewMode('grid'):Promise.resolve()).then(()=>loadItems()).catch(apiError);
   </script>
 </body>
 </html>

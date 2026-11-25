@@ -1,14 +1,16 @@
-"""Local browser-based image caption reviewer (Pillow is optional for TIFF)."""
+"""Local browser-based image caption reviewer (Pillow is optional, for TIFF and grid thumbnails)."""
 
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import json
 import mimetypes
 import os
+import random
 import re
 import sys
 import threading
@@ -32,6 +34,110 @@ from caption_reviewer_state import (
 
 
 MAX_CAPTION_BYTES = 10 * 1024 * 1024
+MAX_ADD_TAGS_BYTES = 10 * 1024 * 1024
+THUMBNAIL_SIZES = (128, 192, 256, 384, 512, 768)
+THUMBNAIL_CACHE_BYTES = 256 * 1024 * 1024
+INLINE_DESCRIPTION_RE = re.compile(r"\.\s+(?=[A-Z0-9])")
+LEGACY_DESCRIPTION_RE = re.compile(r"\n\s*\n")
+
+
+# Grid mode adds tags with the same rules as the dataset tool manual.py when it
+# sits beside this file (activation and @artist placement, deduplication,
+# probability, randomized placement). Standalone copies use the simple fallback.
+try:
+    from manual import (  # type: ignore[import-not-found]
+        append_tags_to_tag_list as _append_tags_to_tag_list,
+        partition_tags_for_caption as _partition_tags_for_caption,
+    )
+
+    TAG_LOGIC = "manual.py"
+except ImportError:
+    _append_tags_to_tag_list = None
+    _partition_tags_for_caption = None
+    TAG_LOGIC = "built-in"
+
+
+def split_tag_text(value: str) -> list[str]:
+    return [tag.strip() for tag in re.sub(r"\s+", " ", value).split(",") if tag.strip()]
+
+
+def split_caption(value: str) -> tuple[list[str], str]:
+    """Python twin of CaptionFilterTools.splitCaptionText."""
+    value = value.strip()
+    if not value:
+        return [], ""
+    legacy = LEGACY_DESCRIPTION_RE.search(value)
+    if legacy:
+        return (
+            split_tag_text(value[: legacy.start()]),
+            re.sub(r"\s+", " ", value[legacy.end() :]).strip(),
+        )
+    value = re.sub(r"\s+", " ", value)
+    boundary = INLINE_DESCRIPTION_RE.search(value)
+    if boundary and "," in value[: boundary.start()]:
+        return split_tag_text(value[: boundary.start()]), value[boundary.end() :].strip()
+    return split_tag_text(value), ""
+
+
+def join_caption(tags: list[str], description: str) -> str:
+    """Python twin of CaptionFilterTools.joinCaptionText."""
+    tags_text = ", ".join(tags)
+    prose = re.sub(r"\s+", " ", description).strip()
+    return f"{tags_text}. {prose}" if tags_text and prose else tags_text or prose
+
+
+def partition_tags(
+    tags: list[str], probability: float, rng: random.Random | None = None
+) -> tuple[list[str], list[str]]:
+    if _partition_tags_for_caption is not None:
+        return _partition_tags_for_caption(tags, probability, rng)
+    if not 0.0 <= probability <= 1.0:
+        raise ValueError("Tag probability must be between 0.0 and 1.0.")
+    if probability == 1.0:
+        return list(tags), []
+    source = rng or random
+    selected: list[str] = []
+    skipped: list[str] = []
+    for tag in tags:
+        (selected if probability and source.random() < probability else skipped).append(tag)
+    return selected, skipped
+
+
+def add_tags(
+    existing: list[str],
+    tags_to_add: list[str],
+    *,
+    randomize_placement: bool = False,
+    important_placement: bool = False,
+    rng: random.Random | None = None,
+) -> tuple[list[str], bool]:
+    if _append_tags_to_tag_list is not None:
+        return _append_tags_to_tag_list(
+            existing,
+            tags_to_add,
+            randomize_placement=randomize_placement,
+            important_placement=important_placement,
+            rng=rng,
+        )
+    result = list(existing)
+    seen = {tag.lower() for tag in result}
+    source = rng or random
+    changed = False
+    for tag in tags_to_add:
+        if tag.lower() in seen:
+            continue
+        if randomize_placement:
+            indexes = range(0, len(result) + 1)
+            if important_placement:
+                index = source.choices(indexes, weights=range(len(result) + 1, 0, -1), k=1)[0]
+            else:
+                index = source.randrange(0, len(result) + 1)
+            result.insert(index, tag)
+        else:
+            result.append(tag)
+        seen.add(tag.lower())
+        changed = True
+    return result, changed
 
 
 @dataclass(frozen=True)
@@ -39,6 +145,26 @@ class CaptionItem:
     image_path: Path
     caption_path: Path
     relative_path: Path
+
+
+def make_thumbnail(path: Path, size: int) -> bytes | None:
+    """Return a JPEG thumbnail, or None when Pillow is unavailable."""
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return None
+    with Image.open(path) as source:
+        source.draft("RGB", (size, size))
+        image = ImageOps.exif_transpose(source)
+        image.thumbnail((size, size), Image.Resampling.LANCZOS)
+        if image.mode in {"RGBA", "LA", "P", "PA"}:
+            image = image.convert("RGBA")
+            background = Image.new("RGBA", image.size, (32, 37, 45, 255))
+            background.alpha_composite(image)
+            image = background
+        output = io.BytesIO()
+        image.convert("RGB").save(output, format="JPEG", quality=86)
+    return output.getvalue()
 
 
 def natural_key(value: str) -> list[tuple[int, object]]:
@@ -72,6 +198,10 @@ class CaptionServer(ThreadingHTTPServer):
         self.state_path = self.root / STATE_FILENAME
         self.state_lock = threading.RLock()
         self.review_state, self.review_fingerprints = self._load_review_state()
+        self.thumbnail_cache: OrderedDict[tuple[str, int, str], bytes] = OrderedDict()
+        self.thumbnail_cache_bytes = 0
+        self.thumbnail_lock = threading.Lock()
+        self.thumbnail_workers = threading.BoundedSemaphore(max(2, (os.cpu_count() or 4) // 2))
         self._reconcile_review_state(self.items)
         try:
             super().__init__(address, CaptionHandler)
@@ -201,6 +331,97 @@ class CaptionServer(ThreadingHTTPServer):
             self.items = items
         return items
 
+    def thumbnail(self, item: CaptionItem, size: int) -> bytes | None:
+        key = (item.relative_path.as_posix(), size, image_signature(item.image_path))
+        with self.thumbnail_lock:
+            data = self.thumbnail_cache.get(key)
+            if data is not None:
+                self.thumbnail_cache.move_to_end(key)
+                return data
+        with self.thumbnail_workers:
+            data = make_thumbnail(item.image_path, size)
+        if data is None:
+            return None
+        with self.thumbnail_lock:
+            if key not in self.thumbnail_cache:
+                self.thumbnail_cache[key] = data
+                self.thumbnail_cache_bytes += len(data)
+            while self.thumbnail_cache_bytes > THUMBNAIL_CACHE_BYTES and self.thumbnail_cache:
+                _, evicted = self.thumbnail_cache.popitem(last=False)
+                self.thumbnail_cache_bytes -= len(evicted)
+        return data
+
+    def items_by_path(self) -> dict[str, CaptionItem]:
+        with self.items_lock:
+            return {item.relative_path.as_posix(): item for item in self.items}
+
+    def add_tags_to_items(
+        self,
+        paths: list[str],
+        tags_to_add: list[str],
+        *,
+        probability: float = 1.0,
+        randomize_placement: bool = False,
+        important_placement: bool = False,
+        rng: random.Random | None = None,
+    ) -> dict[str, object]:
+        """Add tags to many captions, keeping each description and any BOM."""
+        if not 0.0 <= probability <= 1.0:
+            raise ValueError("Tag probability must be between 0.0 and 1.0.")
+        by_path = self.items_by_path()
+        changed: list[str] = []
+        unchanged: list[str] = []
+        skipped: list[str] = []
+        missing: list[str] = []
+        failed: list[dict[str, str]] = []
+        for path in dict.fromkeys(paths):
+            item = by_path.get(path)
+            if item is None or not item.image_path.is_file():
+                missing.append(path)
+                continue
+            selected, _ = partition_tags(tags_to_add, probability, rng)
+            if not selected:
+                skipped.append(path)
+                continue
+            try:
+                with self.save_lock:
+                    try:
+                        raw = item.caption_path.read_bytes()
+                    except FileNotFoundError:
+                        raw = b""
+                    had_bom = raw.startswith(b"\xef\xbb\xbf")
+                    tags, description = split_caption(raw.decode("utf-8-sig"))
+                    new_tags, was_changed = add_tags(
+                        tags,
+                        selected,
+                        randomize_placement=randomize_placement,
+                        important_placement=important_placement,
+                        rng=rng,
+                    )
+                    if not was_changed:
+                        unchanged.append(path)
+                        continue
+                    data = join_caption(new_tags, description).encode("utf-8")
+                    if had_bom:
+                        data = b"\xef\xbb\xbf" + data
+                    temporary = item.caption_path.with_name(
+                        item.caption_path.name + ".caption-reviewer.tmp"
+                    )
+                    temporary.write_bytes(data)
+                    os.replace(temporary, item.caption_path)
+                self.mark_review_status(item, "E")
+                changed.append(path)
+            except (OSError, UnicodeError) as exc:
+                failed.append({"path": path, "error": str(exc)})
+        return {
+            "changed": changed,
+            "unchanged": unchanged,
+            "skipped": skipped,
+            "missing": missing,
+            "failed": failed,
+            "tagLogic": TAG_LOGIC,
+        }
+
     def get_item(self, item_id: int) -> CaptionItem | None:
         with self.items_lock:
             if 0 <= item_id < len(self.items):
@@ -279,7 +500,7 @@ class CaptionHandler(BaseHTTPRequestHandler):
             except OSError as exc:
                 self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
-        if parsed.path in {"/caption_direction_tools.js", "/caption_filter_tools.js"}:
+        if parsed.path in {"/caption_direction_tools.js", "/caption_filter_tools.js", "/caption_grid_tools.js"}:
             try:
                 script_path = self.server.page_path.with_name(parsed.path.removeprefix("/"))
                 self._send_bytes(
@@ -318,6 +539,23 @@ class CaptionHandler(BaseHTTPRequestHandler):
                 )
             except (OSError, UnicodeError) as exc:
                 self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+        if parsed.path == "/api/thumb":
+            try:
+                requested = int(query.get("size", ["256"])[0])
+            except ValueError:
+                requested = 256
+            size = next((value for value in THUMBNAIL_SIZES if value >= requested), THUMBNAIL_SIZES[-1])
+            try:
+                data = self.server.thumbnail(item, size)
+            except (OSError, ValueError) as exc:
+                # Unreadable or unsupported image: the page falls back to /api/image.
+                self._json({"error": str(exc)}, HTTPStatus.UNPROCESSABLE_ENTITY)
+                return
+            if data is None:
+                self._json({"error": "Pillow is not installed"}, HTTPStatus.NOT_IMPLEMENTED)
+            else:
+                self._send_bytes(data, "image/jpeg", cache="private, max-age=60")
             return
         if parsed.path == "/api/image":
             try:
@@ -396,6 +634,37 @@ class CaptionHandler(BaseHTTPRequestHandler):
         except OSError as exc:
             self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def _add_tags(self) -> None:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0 or length > MAX_ADD_TAGS_BYTES:
+            self._json({"error": "Invalid request size"}, HTTPStatus.BAD_REQUEST)
+            return
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            paths = payload["paths"]
+            if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
+                raise TypeError("paths must be a list of image paths")
+            tags = split_tag_text(str(payload["tags"]))
+            if not tags:
+                raise ValueError("Enter at least one tag")
+            probability = float(payload.get("probability", 1.0))
+            randomize = bool(payload.get("randomize", False))
+            important = bool(payload.get("important", False)) and randomize
+            result = self.server.add_tags_to_items(
+                paths,
+                tags,
+                probability=probability,
+                randomize_placement=randomize,
+                important_placement=important,
+            )
+        except (KeyError, TypeError, ValueError, UnicodeError) as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+            return
+        self._json({**result, "items": self._item_list()})
+
     def do_PUT(self) -> None:  # noqa: N802
         parsed = urlsplit(self.path)
         if parsed.path == "/api/caption":
@@ -418,6 +687,8 @@ class CaptionHandler(BaseHTTPRequestHandler):
                 self._json({"error": "Status must be V, E, or D"}, HTTPStatus.BAD_REQUEST)
             else:
                 self._json({"reviewStatus": self.server.set_review_status(item, status)})
+        elif parsed.path == "/api/add-tags":
+            self._add_tags()
         elif parsed.path == "/api/rescan":
             self.server.rescan()
             self._json({"root": str(self.server.root), "items": self._item_list()})
