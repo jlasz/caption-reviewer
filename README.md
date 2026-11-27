@@ -48,6 +48,10 @@ landscape, mountains, sunset. A mountain range is silhouetted against a warm eve
 
 The app also reads the older format with a blank line between tags and description. Inline descriptions are recognized after a period followed by an uppercase letter or digit, when the tag prefix contains a comma. Plain tag lists are supported too. Saving normalizes whitespace and writes tags and description on one line.
 
+## Caption files
+
+By default the app reviews `.txt` captions. A dropdown in the header switches to `.caption` files (prose-only training captions, shown entirely in the description editor) or to both, which lists two entries per image: `name` for the `.txt` and `name [caption]` for the `.caption`. Review progress is kept separately for each file type. You can also start in a mode with `--captions txt|caption|both`. Grid mode never adds tags to `.caption` files.
+
 ## Features
 
 - Image preview with fit and actual-size modes.
@@ -57,12 +61,12 @@ The app also reads the older format with a blank line between tags and descripti
 - Search for `her left`, `his right`, or another supported pronoun/direction pair to reveal tools for swapping directions, changing one direction, or removing matching sentences from the current description.
 - Track **Viewed (V)**, **Edited (E)**, and **Done (D)**. Double-click an already selected image entry to cycle its status.
 - Move between unfinished images, mark the current image done, and resume progress later.
-- Refresh the folder after external changes. Saves detect conflicting caption edits rather than silently replacing them.
+- Live updates: captions changed by other programs (for example a captioning script running at the same time) appear within a few seconds in the editor, the list and the filters, and new or removed images trigger an automatic rescan. Review colours update live too: an image you already marked Viewed or Done whose caption is changed by another program turns **Edited**; images you never opened stay unmarked. An open caption with unsaved edits is never replaced automatically: a **Changed on disk** bar appears with **Load disk version** (discard your unsaved edits) and **Keep mine** (save your text over the file). The same bar appears if a save is refused because the file changed. **Refresh** still forces a full rescan.
 - **Grid mode** (switch between **Review** and **Grid** at the top; the app remembers your choice):
   - Shows thumbnails of exactly the images that pass the filters on the left, updating as you type. Clicking an image name in the left list scrolls to its thumbnail.
   - **Click** a thumbnail to toggle it in **Group A** (blue), **Shift+click** to toggle it in **Group B** (orange). An image can be in both groups, so you can collect two sets (for example two outfits) in one pass. Selections persist while you scroll or change filters; **Select shown** adds every filtered image to a group and **Clear** empties it.
   - Each group has its own tag box (comma-separated) and the same options as the `manual.py` tagging script: **Chance** (probability for each tag in each caption, 0.0-1.0), **Random placement**, and **Favor earlier** (treat added tags as important). **Apply** (or Enter in the tag box) adds the tags to every image in that group after a confirmation, skips tags a caption already has, keeps each description intact, marks changed images Edited, and clears the group.
-  - When `manual.py` and `caption_format.py` sit beside `caption_reviewer.py`, Grid mode uses their exact tag rules (activation tags such as `brf...` stay first, a new `@artist` tag replaces the old one right after them). Otherwise new tags are appended, or placed randomly when Random placement is on.
+  - Grid mode places tags with the rules in `tag_placement.py`: activation tags such as `brf...` stay first, a new `@artist` tag replaces the old one right after them, and with Random placement ordinary tags go anywhere after those. If `tag_placement.py` is missing, new tags are simply appended, or placed randomly when Random placement is on.
   - **Zoom inside a thumbnail:** hover an image and use **Ctrl+wheel** to zoom up to 8x around the cursor; moving the mouse pans, and leaving the tile resets it. The full-resolution image loads once you zoom past 1.5x. The **Zoom** setting in the grid toolbar switches to **Wheel zooms**, where the plain wheel zooms over images; then scroll with the scrollbar, PageUp/PageDown, or the wheel over the gaps between images.
   - Thumbnail size slider. Thumbnails are cached in memory only; nothing is written to the dataset folder.
 

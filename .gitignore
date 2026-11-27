@@ -6,6 +6,7 @@
 !/README.md
 !/caption_reviewer.py
 !/caption_reviewer_state.py
+!/tag_placement.py
 !/caption_reviewer.html
 !/caption_direction_tools.js
 !/caption_filter_tools.js

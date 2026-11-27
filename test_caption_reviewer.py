@@ -70,6 +70,67 @@ class ReviewerTests(unittest.TestCase):
         items = self.api("/api/items")["items"]
         self.assertEqual([item["hasCaption"] for item in items], [True, False])
 
+    def test_caption_file_modes(self) -> None:
+        (self.root / "image2.caption").write_text("Digital illustration of a sky, with clouds. Calm.", encoding="utf-8")
+        self.api("/api/caption?id=0")  # image2.txt becomes Viewed
+        caption_mode = self.api("/api/caption-mode?mode=caption", "POST")
+        self.assertEqual(caption_mode["captionMode"], "caption")
+        self.assertEqual([item["path"] for item in caption_mode["items"]],
+                         ["image2 [caption].png", "image10 [caption].png"])
+        self.assertEqual([item["proseOnly"] for item in caption_mode["items"]], [True, True])
+        self.assertEqual(self.api("/api/caption?id=0")["caption"],
+                         "Digital illustration of a sky, with clouds. Calm.")
+        added = self.api("/api/add-tags", "POST", {"paths": ["image2 [caption].png"], "tags": "rain"})
+        self.assertEqual(added["skipped"], ["image2 [caption].png"])
+        both = self.api("/api/caption-mode?mode=both", "POST")
+        self.assertEqual([(item["path"], item["reviewStatus"]) for item in both["items"]],
+                         [("image2.png", "V"), ("image2 [caption].png", "V"),
+                          ("image10.png", ""), ("image10 [caption].png", "")])
+        self.assertEqual(self.api("/api/changes")["count"], 4)
+        with self.assertRaises(HTTPError):
+            self.api("/api/caption-mode?mode=bogus", "POST")
+
+    def test_live_changes_and_peek(self) -> None:
+        first = self.api("/api/changes")
+        self.assertFalse(first["listChanged"])
+        self.assertEqual(first["count"], 2)
+        self.assertEqual(first["signatures"][1], "missing")
+        # A caption written by another program changes only that item's signature.
+        (self.root / "image10.txt").write_text("1girl, solo. Written by a script.", encoding="utf-8")
+        second = self.api("/api/changes")
+        self.assertEqual(second["signatures"][0], first["signatures"][0])
+        self.assertNotEqual(second["signatures"][1], "missing")
+        # Peeking returns the new text and version without marking the image Viewed.
+        peek = self.api("/api/caption-peek?id=1")
+        self.assertEqual(peek["caption"], "1girl, solo. Written by a script.")
+        self.assertTrue(peek["hasCaption"])
+        self.assertEqual(self.api("/api/items")["items"][1]["reviewStatus"], "")
+        opened = self.api("/api/caption?id=1")
+        self.assertEqual(opened["captionVersion"], peek["captionVersion"])
+        self.assertEqual(opened["reviewStatus"], "V")
+        # Once reviewed, an outside change to the caption is reported as Edited, live.
+        unchanged = self.api("/api/caption-peek?id=1")
+        self.assertEqual(unchanged["reviewStatus"], "V")
+        (self.root / "image10.txt").write_text("1girl, solo. Rewritten by a script.", encoding="utf-8")
+        self.assertEqual(self.api("/api/caption-peek?id=1")["reviewStatus"], "E")
+        self.assertEqual(self.api("/api/items")["items"][1]["reviewStatus"], "E")
+        # An image never opened in the reviewer stays unmarked when a script changes it.
+        (self.root / "image2.txt").write_text("landscape, sea. Rewritten too.", encoding="utf-8")
+        self.assertEqual(self.api("/api/caption-peek?id=0")["reviewStatus"], "")
+        # A new image on disk is reported so the page can rescan.
+        (self.root / "image3.png").write_bytes(self.image)
+        self.assertTrue(self.api("/api/changes")["listChanged"])
+        self.api("/api/rescan", "POST")
+        self.assertFalse(self.api("/api/changes")["listChanged"])
+
+    def test_live_statuses_without_peek(self) -> None:
+        self.api("/api/caption?id=0")  # image2 becomes Viewed
+        self.assertEqual(self.api("/api/changes")["statuses"], ["V", ""])
+        (self.root / "image2.txt").write_text("landscape, rain. Rewritten.", encoding="utf-8")
+        (self.root / "image10.txt").write_text("1girl. New.", encoding="utf-8")
+        # The next snapshot alone reconciles: reviewed image -> Edited, unreviewed stays blank.
+        self.assertEqual(self.api("/api/changes")["statuses"], ["E", ""])
+
     def test_save_conflict_and_progress(self) -> None:
         original = self.api("/api/caption?id=0")
         self.assertEqual(original["reviewStatus"], "V")

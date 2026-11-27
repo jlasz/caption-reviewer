@@ -15,6 +15,7 @@
     header { height:57px; display:flex; align-items:center; gap:12px; padding:0 14px; border-bottom:1px solid var(--line); }
     .brand { font-size:16px; font-weight:650; white-space:nowrap; }
     #root { color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+    #conflict { display:none; align-items:center; gap:6px; color:#ffd166; font-size:12px; } #conflict.show { display:flex; }
     #saveState { color:var(--muted); min-width:110px; text-align:right; } #saveState.dirty { color:#ffd166; } #saveState.error { color:var(--danger); }
     main { height:calc(100% - 114px); min-height:0; display:grid; grid-template-columns:285px minmax(350px,1.5fr) minmax(360px,1fr); grid-template-rows:minmax(0,1fr); gap:1px; background:var(--line); }
     aside, .viewer, .editor-panel { height:100%; min-width:0; min-height:0; overflow:hidden; background:var(--panel); }
@@ -32,6 +33,7 @@
     .filter-input:focus { border-color:var(--accent); }
     #list { flex:1; min-height:0; overflow:auto; scrollbar-color:#424b59 transparent; }
     .item { width:100%; display:flex; align-items:center; gap:8px; border:0; border-radius:5px; background:transparent; padding:6px 8px; text-align:left; color:#cdd3dd; white-space:nowrap; }
+    .item.stale .item-label { font-style:italic; opacity:.7; }
     .item:hover { background:#252b35; } .item.active { background:var(--accent); color:white; }
     .item.viewed { color:#f3d77a; font-weight:600; } .item.edited { color:#e96f1a; font-weight:600; } .item.done { color:#35e47a; font-weight:600; }
     .item.viewed.active { color:#f3d77a; } .item.edited.active { color:#e96f1a; } .item.done.active { color:#35e47a; }
@@ -137,7 +139,17 @@
       <button id="modeGrid" type="button" title="Skim thumbnails, select images, and add tags to them">Grid</button>
     </div>
     <div id="root"></div>
+    <select id="captionMode" class="search-mode" style="min-width:0;padding:2px 4px;color:var(--text);background:var(--panel2)" title="Which caption files to review: .txt, prose-only .caption training captions, or both (two entries per image)">
+      <option value="txt">.txt captions</option>
+      <option value="caption">.caption captions</option>
+      <option value="both">.txt + .caption</option>
+    </select>
     <button id="refresh" class="tiny" title="Rescan for newly generated captions and images">Refresh</button>
+    <span id="conflict" title="This caption file was changed by another program while you had unsaved edits.">
+      Changed on disk:
+      <button id="conflictLoad" class="tiny" type="button" title="Discard your unsaved edits and load the version on disk">Load disk version</button>
+      <button id="conflictKeep" class="tiny" type="button" title="Save your text over the version on disk">Keep mine</button>
+    </span>
     <span id="saveState">Loading…</span>
     <button id="save">Save&nbsp; Ctrl+S</button>
   </header>
@@ -223,7 +235,8 @@
     let items = [], filtered = [], currentId = null, dirty = false, revision = 0;
     let saveTimer = null, saveInFlight = null, viewed = new Set(), actualSize = false;
     let lastTagDeletion = null, undoToastTimer = null;
-    let currentCaptionVersion = null, refreshInFlight = false;
+    let currentCaptionVersion = null, refreshInFlight = false, serverCaptionMode = 'txt';
+    let stickyId = null; // open image kept in the list after an edit made it stop matching the filter
     let itemsRequestGeneration = 0, navigationRequestGeneration = 0;
     const searchModes=[
       {key:'everything',label:'Everything',description:'the entire text file'},
@@ -251,8 +264,9 @@
       const value=$('tagTextEditor').value.replace(/\.\s*$/,'');
       return splitTags(value);
     }
+    function currentProseOnly() { return currentId!==null && !!items[currentId]?.proseOnly; }
     function setEditorCaption(value) {
-      const parts=splitCaptionText(value);
+      const parts=splitCaptionText(value,currentProseOnly());
       $('tagTextEditor').value=parts.tags.join(', ')+(parts.tags.length && parts.description?'. ':'');
       $('descriptionEditor').value=parts.description;
     }
@@ -307,7 +321,7 @@
     function cycleSearchMode(button) {
       const index=searchModes.findIndex(mode=>mode.key===button.dataset.mode);
       button.dataset.mode=searchModes[((index>=0?index:0)+1)%searchModes.length].key;
-      updateSearchModeButton(button); clearTagHighlights(); filterItems();
+      updateSearchModeButton(button); clearTagHighlights(); stickyId=null; filterItems();
       if (button.id==='textSearchMode' && ($('textSearch').matches(':hover') || document.querySelector('.item:hover'))) showTextSearchHighlights();
     }
     function findOriginalTagRange(tagIndex) {
@@ -401,6 +415,7 @@
       const data=await fetchJson(rescan ? '/api/rescan' : '/api/items',{method:rescan?'POST':'GET'},rescan?60000:30000);
       if (requestGeneration!==itemsRequestGeneration) return;
       items=data.items; currentId=null; $('root').textContent=data.root;
+      if (data.captionMode) { serverCaptionMode=data.captionMode; $('captionMode').value=data.captionMode; }
       GridTools.pruneGroups(groups,items.map(item=>item.path)); filterItems();
       if (viewMode==='grid') { pendingReviewPath=oldPath ?? pendingReviewPath; setSaveState('Ready'); if (!items.length) clearView('No supported images found.'); return; }
       await openReviewTarget(oldPath);
@@ -411,24 +426,36 @@
       if (items.length) await goTo(restored >= 0 ? restored : firstUnfinished >= 0 ? firstUnfinished : 0); else clearView('No supported images found.');
     }
 
-    function filterItems() {
+    function matchesFilters(item) {
       const nameTerms=$('search').value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
       const captionQuery=$('textSearch').value.trim().toLocaleLowerCase();
       const negativeCaptionQuery=$('negativeTextSearch').value.trim().toLocaleLowerCase();
       const captionMode=$('textSearchMode').dataset.mode, negativeCaptionMode=$('negativeTextSearchMode').dataset.mode;
-      filtered=items.filter(item => {
-        const rawCaption=item.captionSearch || '';
-        const parts=captionMode==='everything' && negativeCaptionMode==='everything'?null:splitCaptionText(rawCaption);
-        const caption=searchableCaptionText(rawCaption,captionMode,parts).toLocaleLowerCase();
-        const negativeCaption=searchableCaptionText(rawCaption,negativeCaptionMode,parts).toLocaleLowerCase();
-        return nameTerms.every(term => item.path.toLocaleLowerCase().includes(term)) &&
-          (!captionQuery || caption.includes(captionQuery)) &&
-          (!negativeCaptionQuery || !negativeCaption.includes(negativeCaptionQuery));
-      });
+      const rawCaption=item.captionSearch || '';
+      const parts=captionMode==='everything' && negativeCaptionMode==='everything'?null:splitCaptionText(rawCaption,!!item.proseOnly);
+      const caption=searchableCaptionText(rawCaption,captionMode,parts).toLocaleLowerCase();
+      const negativeCaption=searchableCaptionText(rawCaption,negativeCaptionMode,parts).toLocaleLowerCase();
+      return nameTerms.every(term => item.path.toLocaleLowerCase().includes(term)) &&
+        (!captionQuery || caption.includes(captionQuery)) &&
+        (!negativeCaptionQuery || !negativeCaption.includes(negativeCaptionQuery));
+    }
+    function computeFiltered() {
+      return items.filter(item => item.id===stickyId || matchesFilters(item));
+    }
+    function refilterKeepingCurrent() {
+      // After an edit or a live update, keep the open image listed even if it stops matching the filter.
+      if (currentId!==null && filtered.some(item=>item.id===currentId)) stickyId=currentId;
+      filterItems();
+    }
+
+    function filterItems() {
+      filtered=computeFiltered();
       const fragment=document.createDocumentFragment();
       for (const item of filtered) {
         const statusClass=item.reviewStatus==='D'?' done':item.reviewStatus==='E'?' edited':item.reviewStatus==='V'?' viewed':'';
-        const button=document.createElement('button'); button.className='item'+statusClass+(item.id===currentId?' active':''); button.dataset.id=item.id; button.title=item.path+'\nDouble-click when selected to cycle Viewed/Edited/Done';
+        const button=document.createElement('button'); const stale=item.id===stickyId && !matchesFilters(item);
+        button.className='item'+statusClass+(item.id===currentId?' active':'')+(stale?' stale':''); button.dataset.id=item.id;
+        button.title=item.path+(stale?'\nNo longer matches the filter; shown until you move to another image':'')+'\nDouble-click when selected to cycle Viewed/Edited/Done';
         const dot=document.createElement('span'); dot.className='dot'+(item.hasCaption?'':' missing');
         const label=document.createElement('span'); label.className='item-label'; label.textContent=item.path.replace(/\.[^.]+$/, '')+(item.reviewStatus?` ${item.reviewStatus}`:'');
         button.append(dot,label);
@@ -490,7 +517,9 @@
       try {
         const data=await fetchJson(`/api/caption?id=${id}`);
         if (requestGeneration!==navigationRequestGeneration) return;
-        currentId=id; viewed.add(id); dirty=false; revision++; currentCaptionVersion=data.captionVersion; clearTimeout(saveTimer); hideUndoToast(true);
+        const dropSticky=stickyId!==null && stickyId!==id;
+        currentId=id; viewed.add(id); dirty=false; revision++; currentCaptionVersion=data.captionVersion; hideConflict();
+        if (dropSticky) { stickyId=null; filterItems(); } clearTimeout(saveTimer); hideUndoToast(true);
         $('tagTextEditor').disabled=false; $('descriptionEditor').disabled=false; setEditorCaption(data.caption); updateStats(); renderTags(); renderDirectionTools();
         $('image')?.remove(); const image=document.createElement('img'); image.id='image'; image.alt=target.path; image.src=`/api/image?id=${id}`;
         image.addEventListener('dblclick',toggleFit); $('imageHost').replaceChildren(image);
@@ -522,8 +551,11 @@
           if (currentId===id && revision===savedRevision) { dirty=false; setSaveState('Saved'); }
           else if (currentId===id) { dirty=true; setSaveState('Unsaved changes','dirty'); }
           const dot=document.querySelector(`.item[data-id="${id}"] .dot`); dot?.classList.remove('missing');
-          if ($('textSearch').value || $('negativeTextSearch').value) filterItems(); return true;
-        } catch(error) { apiError(error); return false; } finally { saveInFlight=null; }
+          if ($('textSearch').value || $('negativeTextSearch').value) refilterKeepingCurrent(); return true;
+        } catch(error) {
+          if (String(error?.message).includes('changed outside the reviewer') && currentId===id) { await showConflict(id); return false; }
+          apiError(error); return false;
+        } finally { saveInFlight=null; }
       })();
       return await saveInFlight;
     }
@@ -533,8 +565,11 @@
       if (!filtered.length) return null;
       const position=filtered.findIndex(item=>item.id===currentId);
       if (position<0) {
+        // The open image is not in the current list (e.g. an edit made it stop matching a text filter):
+        // continue from its place in the folder order instead of jumping back to the top of the list.
         const candidates=offset>0?filtered:[...filtered].reverse();
-        return candidates.find(item=>item.reviewStatus!=='D')?.id ?? null;
+        const ahead=currentId===null?candidates:candidates.filter(item=>offset>0?item.id>currentId:item.id<currentId);
+        return ahead.find(item=>item.reviewStatus!=='D')?.id ?? null;
       }
       for (let index=position+offset;index>=0 && index<filtered.length;index+=offset) {
         if (filtered[index].reviewStatus!=='D') return filtered[index].id;
@@ -824,6 +859,19 @@
     }
     $('textSearch').addEventListener('mouseenter',showTextSearchHighlights);
     $('textSearch').addEventListener('mouseleave',clearTagHighlights);
+    for (const id of ['search','textSearch','negativeTextSearch']) $(id).addEventListener('input',()=>{stickyId=null},{capture:true});
+    $('conflictLoad').addEventListener('click',loadConflictVersion);
+    $('conflictKeep').addEventListener('click',keepMyVersion);
+    $('captionMode').addEventListener('change',async()=>{
+      const select=$('captionMode'), mode=select.value;
+      if (refreshInFlight || !await flushSave()) { select.value=serverCaptionMode; return; }
+      refreshInFlight=true; $('refresh').disabled=true; select.disabled=true;
+      try {
+        await fetchJson('/api/caption-mode?mode='+encodeURIComponent(mode),{method:'POST'},60000);
+        await loadItems();
+      } catch(error) { apiError(error); }
+      finally { refreshInFlight=false; $('refresh').disabled=false; select.disabled=false; }
+    });
     $('refresh').addEventListener('click',async()=>{
       if (refreshInFlight || !await flushSave()) return;
       refreshInFlight=true; $('refresh').disabled=true;
@@ -843,6 +891,100 @@
     });
     document.addEventListener('visibilitychange',()=>{if(document.hidden) saveNow()});
     window.addEventListener('pagehide',()=>{if(dirty&&currentId!==null) navigator.sendBeacon(`/api/caption?id=${currentId}`,new Blob([JSON.stringify({caption:editorCaption(),captionVersion:currentCaptionVersion})],{type:'application/json'}))});
+    // Conflict handling: the caption file changed on disk while this editor had unsaved edits.
+    let conflict=null; // {id, caption, captionVersion} of the version on disk
+    function hideConflict() { conflict=null; $('conflict').classList.remove('show'); }
+    async function showConflict(id) {
+      try {
+        const data=await fetchJson(`/api/caption-peek?id=${id}`);
+        if (id!==currentId) return;
+        conflict={id,caption:data.caption,captionVersion:data.captionVersion};
+        $('conflict').classList.add('show');
+        setSaveState('Not saved: changed on disk','dirty');
+      } catch(error) { apiError(error); }
+    }
+    function loadConflictVersion() {
+      if (!conflict || conflict.id!==currentId) return hideConflict();
+      clearTimeout(saveTimer); setEditorCaption(conflict.caption); currentCaptionVersion=conflict.captionVersion;
+      items[currentId].captionSearch=conflict.caption; dirty=false; revision++;
+      updateStats(); renderTags(); renderDirectionTools(); hideConflict(); setSaveState('Loaded from disk');
+    }
+    async function keepMyVersion() {
+      if (!conflict || conflict.id!==currentId) return hideConflict();
+      currentCaptionVersion=conflict.captionVersion; hideConflict(); dirty=true; await saveNow();
+    }
+
+    // Live updates: poll cheap caption-file signatures and pull in captions changed outside the reviewer
+    // (e.g. by a captioning script), without marking anything Viewed. Unsaved edits are never overwritten.
+    const LIVE_POLL_MS=2500;
+    let liveSignatures=null, liveItemsGeneration=-1, livePollBusy=false;
+    function setItemDot(id,hasCaption) {
+      document.querySelector(`.item[data-id="${id}"] .dot`)?.classList.toggle('missing',!hasCaption);
+      const tile=document.querySelector(`.tile[data-id="${id}"]`);
+      if (tile) { tile.classList.toggle('missing-caption',!hasCaption); tile.title=items[id].path+(hasCaption?'':'\n(no caption file yet)'); }
+    }
+    function updateTileStatus(id) {
+      const tile=document.querySelector(`.tile[data-id="${id}"]`); if (!tile) return;
+      const status=items[id].reviewStatus; let badge=tile.querySelector('.tile-status');
+      if (!status) { badge?.remove(); return; }
+      if (!badge) { badge=document.createElement('span'); tile.querySelector('.tile-meta')?.append(badge); }
+      badge.className=`tile-status st-${status}`; badge.textContent=status;
+    }
+    async function applyExternalCaption(id,generation) {
+      const data=await fetchJson(`/api/caption-peek?id=${id}`);
+      if (generation!==itemsRequestGeneration || !items[id]) return false;
+      items[id].captionSearch=data.caption; items[id].hasCaption=data.hasCaption; setItemDot(id,data.hasCaption);
+      if (data.reviewStatus && data.reviewStatus!==items[id].reviewStatus) { updateReviewStatus(id,data.reviewStatus); updateTileStatus(id); }
+      if (id===currentId && data.captionVersion!==currentCaptionVersion) {
+        if (!dirty && !saveInFlight) {
+          const tagsFocused=document.activeElement===$('tagTextEditor'), descFocused=document.activeElement===$('descriptionEditor');
+          const descCaret=$('descriptionEditor').selectionStart;
+          setEditorCaption(data.caption); currentCaptionVersion=data.captionVersion; revision++;
+          updateStats(); renderTags(); renderDirectionTools(); setSaveState('Updated from disk');
+          if (descFocused) { $('descriptionEditor').focus(); const at=Math.min(descCaret,$('descriptionEditor').value.length); $('descriptionEditor').setSelectionRange(at,at); }
+          else if (tagsFocused) $('tagTextEditor').focus();
+        } else {
+          await showConflict(id);
+        }
+      }
+      return true;
+    }
+    async function pollLiveChanges() {
+      if (livePollBusy || document.hidden || refreshInFlight) return;
+      livePollBusy=true;
+      try {
+        const generation=itemsRequestGeneration;
+        const data=await fetchJson('/api/changes',{},10000);
+        if (generation!==itemsRequestGeneration) return;
+        if (data.listChanged) {
+          if (!dirty && !saveInFlight && !refreshInFlight) {
+            refreshInFlight=true; $('refresh').disabled=true;
+            try { await loadItems(true); } finally { refreshInFlight=false; $('refresh').disabled=false; }
+            liveSignatures=null;
+          }
+          return;
+        }
+        if (data.count!==items.length) return;
+        // Colours: always mirror the server's statuses, so none are missed between polls.
+        (data.statuses||[]).forEach((status,id)=>{ if (status && status!==items[id].reviewStatus) { updateReviewStatus(id,status); updateTileStatus(id); } });
+        if (liveSignatures===null || liveItemsGeneration!==generation) {
+          liveSignatures=data.signatures; liveItemsGeneration=generation; return;
+        }
+        const changed=[];
+        data.signatures.forEach((signature,id)=>{ if (signature!==liveSignatures[id]) changed.push(id); });
+        if (!changed.length) return;
+        const before=filtered.map(item=>item.id).join(',');
+        for (const id of changed) {
+          if (!await applyExternalCaption(id,generation)) return;
+          liveSignatures[id]=data.signatures[id]; // advanced only once applied, so a failed fetch is retried
+        }
+        if (currentId!==null && filtered.some(item=>item.id===currentId)) stickyId=currentId;
+        if (computeFiltered().map(item=>item.id).join(',')!==before) filterItems();
+        else if (viewMode!=='grid') showTextSearchHighlights();
+      } catch { /* server busy or restarting: try again on the next tick */ }
+      finally { livePollBusy=false; }
+    }
+    (function liveLoop() { setTimeout(async()=>{ await pollLiveChanges(); liveLoop(); },LIVE_POLL_MS); })();
     // Open straight into grid mode when that was last used, without marking an image Viewed.
     (storage.get('mode','review')==='grid'?setViewMode('grid'):Promise.resolve()).then(()=>loadItems()).catch(apiError);
   </script>

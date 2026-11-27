@@ -14,9 +14,11 @@
   }
 
   // Support inline tags plus prose as well as legacy blank-line captions.
-  function splitCaptionText(value) {
+  // proseOnly: the whole file is description (prose-only .caption training captions).
+  function splitCaptionText(value, proseOnly = false) {
     value = String(value ?? '').trim();
     if (!value) return { tags: [], description: '' };
+    if (proseOnly) return { tags: [], description: flattenCaptionPart(value) };
     const legacy = value.match(/\n\s*\n/);
     if (legacy) {
       const at = legacy.index;

@@ -39,18 +39,22 @@ THUMBNAIL_SIZES = (128, 192, 256, 384, 512, 768)
 THUMBNAIL_CACHE_BYTES = 256 * 1024 * 1024
 INLINE_DESCRIPTION_RE = re.compile(r"\.\s+(?=[A-Z0-9])")
 LEGACY_DESCRIPTION_RE = re.compile(r"\n\s*\n")
+# Which caption files are reviewed: .txt (tags and/or prose), .caption (prose-only training
+# captions), or both, shown as two entries per image.
+CAPTION_MODES = {"txt": (".txt",), "caption": (".caption",), "both": (".txt", ".caption")}
+PROSE_ONLY_EXTENSIONS = {".caption"}
 
 
-# Grid mode adds tags with the same rules as the dataset tool manual.py when it
-# sits beside this file (activation and @artist placement, deduplication,
-# probability, randomized placement). Standalone copies use the simple fallback.
+# Grid mode adds tags with the rules in tag_placement.py beside this file (activation and
+# @artist placement, deduplication, probability, randomized placement); the dataset tool
+# manual.py imports the same module. The simple built-in fallback is used if it is missing.
 try:
-    from manual import (  # type: ignore[import-not-found]
+    from tag_placement import (  # type: ignore[import-not-found]
         append_tags_to_tag_list as _append_tags_to_tag_list,
         partition_tags_for_caption as _partition_tags_for_caption,
     )
 
-    TAG_LOGIC = "manual.py"
+    TAG_LOGIC = "tag_placement.py"
 except ImportError:
     _append_tags_to_tag_list = None
     _partition_tags_for_caption = None
@@ -140,11 +144,29 @@ def add_tags(
     return result, changed
 
 
+def item_key(relative_path: Path, caption_ext: str) -> str:
+    """Review-state key and list path. .txt keeps the plain image path (unchanged from older
+    versions), other caption files get a marker, e.g. "image_1 [caption].png"."""
+    if caption_ext == ".txt":
+        return relative_path.as_posix()
+    marked = relative_path.with_name(f"{relative_path.stem} [{caption_ext.lstrip('.')}]{relative_path.suffix}")
+    return marked.as_posix()
+
+
 @dataclass(frozen=True)
 class CaptionItem:
     image_path: Path
     caption_path: Path
     relative_path: Path
+    caption_ext: str = ".txt"
+
+    @property
+    def key(self) -> str:
+        return item_key(self.relative_path, self.caption_ext)
+
+    @property
+    def prose_only(self) -> bool:
+        return self.caption_ext in PROSE_ONLY_EXTENSIONS
 
 
 def make_thumbnail(path: Path, size: int) -> bytes | None:
@@ -174,25 +196,34 @@ def natural_key(value: str) -> list[tuple[int, object]]:
     ]
 
 
-def scan_folder(root: Path) -> list[CaptionItem]:
-    items = [
-        CaptionItem(path, path.with_suffix(".txt"), path.relative_to(root))
+def scan_folder(root: Path, mode: str = "txt") -> list[CaptionItem]:
+    extensions = CAPTION_MODES[mode]
+    images = [
+        path
         for path in root.rglob("*")
         if path.is_file() and path.suffix.casefold() in IMAGE_EXTENSIONS
     ]
-    return sorted(items, key=lambda item: natural_key(str(item.relative_path)))
+    images.sort(key=lambda path: natural_key(str(path.relative_to(root))))
+    return [
+        CaptionItem(path, path.with_suffix(ext), path.relative_to(root), ext)
+        for path in images
+        for ext in extensions
+    ]
 
 
 class CaptionServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], root: Path, page_path: Path) -> None:
+    def __init__(self, address: tuple[str, int], root: Path, page_path: Path, caption_mode: str = "txt") -> None:
+        if caption_mode not in CAPTION_MODES:
+            raise ValueError(f"Caption mode must be one of: {', '.join(CAPTION_MODES)}")
+        self.caption_mode = caption_mode
         self.root = root.resolve()
         self.page_path = page_path
         self.lock_path = self.root / LOCK_FILENAME
         self._lock_owned = False
         self._acquire_instance_lock()
-        self.items = scan_folder(self.root)
+        self.items = scan_folder(self.root, self.caption_mode)
         self.items_lock = threading.RLock()
         self.save_lock = threading.Lock()
         self.state_path = self.root / STATE_FILENAME
@@ -203,6 +234,8 @@ class CaptionServer(ThreadingHTTPServer):
         self.thumbnail_lock = threading.Lock()
         self.thumbnail_workers = threading.BoundedSemaphore(max(2, (os.cpu_count() or 4) // 2))
         self._reconcile_review_state(self.items)
+        self.live_signatures: dict[str, str] = {}
+        self.live_lock = threading.Lock()
         try:
             super().__init__(address, CaptionHandler)
         except BaseException:
@@ -249,11 +282,20 @@ class CaptionServer(ThreadingHTTPServer):
 
     def _reconcile_review_state(self, items: list[CaptionItem]) -> None:
         with self.state_lock:
-            by_key = {item.relative_path.as_posix(): item for item in items}
+            by_key = {item.key: item for item in items}
+            # Keys of every caption mode for the images that still exist, so switching modes
+            # keeps the other mode's review progress; only entries of removed images are dropped.
+            valid_keys = {
+                item_key(item.relative_path, ext)
+                for item in items
+                for ext in CAPTION_MODES["both"]
+            }
             changed = False
             for key in list(self.review_state):
                 item = by_key.get(key)
                 if item is None:
+                    if key in valid_keys:
+                        continue
                     self.review_state.pop(key, None)
                     self.review_fingerprints.pop(key, None)
                     changed = True
@@ -267,20 +309,38 @@ class CaptionServer(ThreadingHTTPServer):
                     self.review_fingerprints[key] = current
                     changed = True
             for key in list(self.review_fingerprints):
-                if key not in self.review_state:
+                if key not in self.review_state and key not in valid_keys:
                     self.review_fingerprints.pop(key, None)
                     changed = True
             if changed or self.state_path.exists():
                 self._write_review_state_locked()
 
+    def reconcile_item(self, item: CaptionItem) -> str:
+        """Live version of the rescan check for one image: a reviewed image whose caption or
+        image changed outside the reviewer becomes Edited. Returns the current status."""
+        key = item.key
+        with self.state_lock:
+            status = self.review_state.get(key, "")
+            if not status:
+                return status
+            current = self._fingerprint(item)
+            previous = self.review_fingerprints.get(key)
+            if previous == current:
+                return status
+            if previous and status != "E":
+                status = self.review_state[key] = "E"
+            self.review_fingerprints[key] = current
+            self._write_review_state_locked()
+            return status
+
     def review_status(self, item: CaptionItem) -> str:
-        key = item.relative_path.as_posix()
+        key = item.key
         with self.state_lock:
             return self.review_state.get(key, "")
 
     def mark_review_status(self, item: CaptionItem, status: str) -> str:
         """Record viewing or editing without viewing downgrading later states."""
-        key = item.relative_path.as_posix()
+        key = item.key
         with self.state_lock:
             current = self.review_state.get(key, "")
             if status == "V":
@@ -304,7 +364,7 @@ class CaptionServer(ThreadingHTTPServer):
         """Explicitly set a status, allowing the UI to cycle V, E, and D."""
         if status not in {"V", "E", "D"}:
             raise ValueError("Review status must be V, E, or D")
-        key = item.relative_path.as_posix()
+        key = item.key
         with self.state_lock:
             if self.review_state.get(key) == status:
                 fingerprint = self._fingerprint(item)
@@ -325,11 +385,20 @@ class CaptionServer(ThreadingHTTPServer):
             print(f"Warning: could not save review state: {exc}", file=sys.stderr)
 
     def rescan(self) -> list[CaptionItem]:
-        items = scan_folder(self.root)
+        items = scan_folder(self.root, self.caption_mode)
         self._reconcile_review_state(items)
         with self.items_lock:
             self.items = items
         return items
+
+    def set_caption_mode(self, mode: str) -> list[CaptionItem]:
+        if mode not in CAPTION_MODES:
+            raise ValueError(f"Caption mode must be one of: {', '.join(CAPTION_MODES)}")
+        with self.items_lock:
+            self.caption_mode = mode
+        with self.live_lock:
+            self.live_signatures.clear()
+        return self.rescan()
 
     def thumbnail(self, item: CaptionItem, size: int) -> bytes | None:
         key = (item.relative_path.as_posix(), size, image_signature(item.image_path))
@@ -351,9 +420,43 @@ class CaptionServer(ThreadingHTTPServer):
                 self.thumbnail_cache_bytes -= len(evicted)
         return data
 
+    def change_snapshot(self) -> dict[str, object]:
+        """Cheap state for live updates: caption file signatures, review statuses, and whether the
+        image list changed. Any caption that changed since the previous snapshot is reconciled
+        here, so a reviewed image edited by another program turns Edited even if no page saw it."""
+        with self.items_lock:
+            current = list(self.items)
+        fresh_paths = {item.key for item in scan_folder(self.root, self.caption_mode)}
+        list_changed = fresh_paths != {item.key for item in current}
+        signatures: list[str] = []
+        statuses: list[str] = []
+        with self.live_lock:
+            for item in current:
+                key = item.key
+                try:
+                    stat = item.caption_path.stat()
+                    signature = f"{stat.st_mtime_ns}:{stat.st_size}"
+                except FileNotFoundError:
+                    signature = "missing"
+                except OSError:
+                    signature = "error"
+                previous = self.live_signatures.get(key)
+                self.live_signatures[key] = signature
+                if previous is not None and previous != signature:
+                    statuses.append(self.reconcile_item(item))
+                else:
+                    statuses.append(self.review_status(item))
+                signatures.append(signature)
+        return {
+            "listChanged": list_changed,
+            "count": len(current),
+            "signatures": signatures,
+            "statuses": statuses,
+        }
+
     def items_by_path(self) -> dict[str, CaptionItem]:
         with self.items_lock:
-            return {item.relative_path.as_posix(): item for item in self.items}
+            return {item.key: item for item in self.items}
 
     def add_tags_to_items(
         self,
@@ -378,6 +481,10 @@ class CaptionServer(ThreadingHTTPServer):
             item = by_path.get(path)
             if item is None or not item.image_path.is_file():
                 missing.append(path)
+                continue
+            if item.prose_only:
+                # Prose-only training captions never get a tag list.
+                skipped.append(path)
                 continue
             selected, _ = partition_tags(tags_to_add, probability, rng)
             if not selected:
@@ -463,6 +570,13 @@ class CaptionHandler(BaseHTTPRequestHandler):
         except ValueError:
             return None
 
+    def _items_payload(self) -> dict[str, object]:
+        return {
+            "root": str(self.server.root),
+            "captionMode": self.server.caption_mode,
+            "items": self._item_list(),
+        }
+
     def _item_list(self) -> list[dict[str, object]]:
         with self.server.items_lock:
             indexed_items = list(enumerate(self.server.items))
@@ -480,8 +594,10 @@ class CaptionHandler(BaseHTTPRequestHandler):
                 has_caption = item.caption_path.exists()
             return {
                     "id": index,
-                    "path": item.relative_path.as_posix(),
+                    "path": item.key,
                     "name": item.relative_path.stem,
+                    "captionExt": item.caption_ext,
+                    "proseOnly": item.prose_only,
                     "hasCaption": has_caption,
                     "captionSearch": caption_search,
                     "reviewStatus": self.server.review_status(item),
@@ -512,12 +628,44 @@ class CaptionHandler(BaseHTTPRequestHandler):
                 self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         if parsed.path == "/api/items":
-            self._json({"root": str(self.server.root), "items": self._item_list()})
+            self._json(self._items_payload())
+            return
+        if parsed.path == "/api/changes":
+            try:
+                self._json(self.server.change_snapshot())
+            except OSError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         item_id = self._item_id(query)
         item = self.server.get_item(item_id) if item_id is not None else None
         if item is None:
             self._json({"error": "Unknown image id"}, HTTPStatus.NOT_FOUND)
+            return
+        if parsed.path == "/api/caption-peek":
+            # Like /api/caption but never marks Viewed; used by live updates. A reviewed image whose
+            # caption changed outside the reviewer is marked Edited, as a rescan would do.
+            try:
+                if item.caption_path.exists():
+                    raw = item.caption_path.read_bytes()
+                    self._json(
+                        {
+                            "caption": raw.decode("utf-8-sig"),
+                            "hasCaption": True,
+                            "captionVersion": hashlib.sha256(raw).hexdigest(),
+                            "reviewStatus": self.server.reconcile_item(item),
+                        }
+                    )
+                else:
+                    self._json(
+                        {
+                            "caption": "",
+                            "hasCaption": False,
+                            "captionVersion": "missing",
+                            "reviewStatus": self.server.reconcile_item(item),
+                        }
+                    )
+            except (OSError, UnicodeError) as exc:
+                self._json({"error": str(exc)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
         if parsed.path == "/api/caption":
             try:
@@ -691,7 +839,15 @@ class CaptionHandler(BaseHTTPRequestHandler):
             self._add_tags()
         elif parsed.path == "/api/rescan":
             self.server.rescan()
-            self._json({"root": str(self.server.root), "items": self._item_list()})
+            self._json(self._items_payload())
+        elif parsed.path == "/api/caption-mode":
+            mode = parse_qs(parsed.query).get("mode", [""])[0]
+            try:
+                self.server.set_caption_mode(mode)
+            except ValueError as exc:
+                self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+                return
+            self._json(self._items_payload())
         else:
             self._json({"error": "Not found"}, HTTPStatus.NOT_FOUND)
 
@@ -700,6 +856,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Review image captions in a browser.")
     parser.add_argument("folder", nargs="?", type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument("--port", type=int, default=0, help="Local port (default: choose a free port)")
+    parser.add_argument(
+        "--captions",
+        choices=sorted(CAPTION_MODES),
+        default="txt",
+        help="Caption files to review: txt, caption (prose-only .caption files), or both. Switchable in the page.",
+    )
     parser.add_argument("--no-browser", action="store_true", help=argparse.SUPPRESS)
     return parser.parse_args()
 
@@ -715,10 +877,10 @@ def main() -> None:
         raise SystemExit(f"Dataset folder does not exist: {root}")
     if not page.is_file():
         raise SystemExit(f"App page is missing: {page}")
-    server = CaptionServer(("127.0.0.1", args.port), root, page)
+    server = CaptionServer(("127.0.0.1", args.port), root, page, args.captions)
     host, port = server.server_address
     url = f"http://{host}:{port}/"
-    print(f"Caption Reviewer: {len(server.items):,} images in {root}")
+    print(f"Caption Reviewer: {len(server.items):,} captions ({args.captions}) in {root}")
     print(f"Open {url}")
     print("Keep this window open while reviewing. Press Ctrl+C here to stop.")
     if not args.no_browser:
